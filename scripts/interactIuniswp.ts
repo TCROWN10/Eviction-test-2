@@ -1,89 +1,65 @@
 import { ethers } from "hardhat";
-import { BigNumber } from "ethers";
-const helpers = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const helpers = require("@nomicfoundation/hardhat-network-helpers");
+
+// Addresses
+const UniswapV3Address = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+const usdcAddress = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const wethAddress = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+const usdcWhale = "0xf584f8728b874a6a5c7a8d4d387c9aae9172d621";
 
 async function main() {
-    const currentTimestampInSeconds = Math.round(Date.now() / 1000);
-    const deadline = currentTimestampInSeconds + 86400;
+    console.log("USDC Address:", usdcAddress);
+    console.log("WETH Address:", wethAddress);
+    console.log("Uniswap V3 Position Manager Address:", UniswapV3Address);
+    console.log("USDC Whale Address:", usdcWhale);
 
-    const NONFUNGIBLE_POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
-    const UNISWAP_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
-    const USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
-    const DAI = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
-    const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-    const HOLDER = "0x2933782B5A8d72f2754103D1489614F29bfA4625";
+    // Impersonate USDC Whale
+    await helpers.impersonateAccount(usdcWhale);
+    const impersonatedSigner = await ethers.getSigner(usdcWhale);
 
-    // Impersonate the holder
-    await helpers.impersonateAccount(HOLDER);
-    const impersonatedHolder = await ethers.getSigner(HOLDER);
+    // Fund impersonated account with ETH for gas fees
+    await helpers.setBalance(usdcWhale, ethers.parseUnits("1", 18)); // Provide 1 ETH
+    console.log("ETH balance set for impersonated account!");
 
-    const positionManager = await ethers.getContractAt(
-        "INonfungiblePositionManager",
-        NONFUNGIBLE_POSITION_MANAGER
-    );
+    // Get contract instances
+    const usdc = await ethers.getContractAt("IERC20", usdcAddress);
+    const weth = await ethers.getContractAt("IERC20", wethAddress);
+    const uniswapV3 = await ethers.getContractAt("IUniswapV3PositionManager", UniswapV3Address);
 
-    const usdt = await ethers.getContractAt("IERC20", USDT);
-    const dai = await ethers.getContractAt("IERC20", DAI);
+    // Approve Uniswap to spend USDC and WETH
+    await usdc.connect(impersonatedSigner).approve(UniswapV3Address, ethers.MaxUint256);
+    await weth.connect(impersonatedSigner).approve(UniswapV3Address, ethers.MaxUint256);
 
-    const amountADesired = ethers.parseEther("20");
-    const amountBDesired = ethers.parseEther("20");
-    const approveAmt = ethers.parseEther("100000");
+    console.log("Tokens approved!");
 
-    console.log("========== Approving tokens ==========");
-    await usdt.connect(impersonatedHolder).approve(NONFUNGIBLE_POSITION_MANAGER, approveAmt);
-    await dai.connect(impersonatedHolder).approve(NONFUNGIBLE_POSITION_MANAGER, approveAmt);
-    console.log("========== Tokens Approved ==========");
+    // Define liquidity parameters
+    const params = {
+        token0: usdcAddress,
+        token1: wethAddress,
+        fee: 3000,
+        tickLower: -887220,
+        tickUpper: 887220,
+        amount0Desired: ethers.parseUnits("500", 6), // 500 USDC
+        amount1Desired: ethers.parseUnits("0.5", 18), // 0.5 WETH
+        amount0Min: 0,
+        amount1Min: 0,
+        recipient: impersonatedSigner.address,
+        deadline: Math.floor(Date.now() / 1000) + 600,
+    };
 
-    console.log("========== Adding liquidity ==========");
-    const addLiquidityTx = await positionManager.connect(impersonatedHolder).mint(
-        USDT, 
-        DAI, 
-        3000, 
-        -887220, 
-        887220, 
-        amountADesired, // amount0Desired
-        amountBDesired, 
-        0, // amount0Min
-        0, // amount1Min
-        HOLDER, // recipient
-        deadline // deadline
-    );
-    await addLiquidityTx.wait();
-    console.log("========== Liquidity Added ==========");
+    console.log("Minting liquidity...", params);
 
-    console.log("========== Fetching position ID ==========");
-    const balance = await positionManager.balanceOf(HOLDER);
-    if (balance.eq(0)) {
-        console.log("No liquidity position found.");
-        return;
+    // Add liquidity
+    try {
+        const tx = await uniswapV3.mint(params);
+        await tx.wait();
+        console.log("Liquidity added successfully!", tx.hash);
+    } catch (error) {
+        console.error("Minting liquidity failed:", error);
     }
-
-    const tokenId = await positionManager.tokenOfOwnerByIndex(HOLDER, 0);
-    console.log("Position ID:", tokenId.toString());
-
-    console.log("========== Removing liquidity ==========");
-    const decreaseLiquidityTx = await positionManager.connect(impersonatedHolder).decreaseLiquidity(
-        tokenId, // tokenId
-        ethers.parseEther("10"), // liquidity to remove
-        0, // amount0Min
-        0, // amount1Min
-        deadline // deadline
-    );
-    await decreaseLiquidityTx.wait();
-    console.log("========== Liquidity Removed ==========");
-
-    console.log("========== Collecting Fees ==========");
-    const collectTx = await positionManager.connect(impersonatedHolder).collect(
-        tokenId, // tokenId
-        HOLDER, // recipient
-        ethers.MaxUint128, // amount0Max
-        ethers.MaxUint128 // amount1Max
-    );
-    await collectTx.wait();
-    console.log("========== Fees Collected ==========");
 }
 
 main().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
+    console.error("Script failed:", error);
+    process.exit(1);
 });
